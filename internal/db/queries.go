@@ -2,150 +2,165 @@ package db
 
 import (
 	"context"
+	"database/sql"
 
-	"errors"
-	"fmt"
+	"encoding/json"
+	"fmt" // FORMAT PACKAGE
 	"log"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // repository struct mein saare DB operations hai
 type Repository struct {
-	DB *pgxpool.Pool
+	DB *sql.DB
 }
 
 // ek naya repo bna rha hai (say for a new user)
-func NewRepository(db *pgxpool.Pool) *Repository {
+func NewRepository(db *sql.DB) *Repository {
 	return &Repository{DB: db}
 }
 
-// yeh combined function hai insert + update = upsert (insert new peer and update if already exists)
-func (r *Repository) UpsertPeer(ctx context.Context, peerID, name string, multiaddrs []string) (uuid.UUID, error) {
+func (r *Repository) UpsertPeer(ctx context.Context, peerID, name string) (int64, error) {
 	now := time.Now()
-	var peerUUID uuid.UUID
-
-	// Begin a transaction for atomicity.
-	tx, err := r.DB.Begin(ctx)
+	var peerUUID int64 // store peer uuid AS INT
+	fmt.Println("debugging 11")
+	tx, err := r.DB.BeginTx(ctx, nil)
+	fmt.Println("debugging 12")
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("could not begin transaction: %w", err)
+		return 0, fmt.Errorf("could not begin transaction: %w", err)
 	}
-	// Defer a rollback in case of any error. It's a no-op if the transaction is committed.
-	defer tx.Rollback(ctx)
+	defer tx.Rollback()
+	fmt.Println("debugging 13")
+	// Atomic upsert using ON CONFLICT
+	upsertQuery := `
+        INSERT INTO peers (peer_id, name, multiaddrs, is_online, last_seen, created_at)
+        VALUES (?, ?, ?, 1, ?, ?)
+        ON CONFLICT (peer_id) 
+        DO UPDATE SET 
+            name = excluded.name,
+            multiaddrs = excluded.multiaddrs,
+            is_online = 1,
+            last_seen = excluded.last_seen
+    `
+	fmt.Println("debugging 14")
 
-	// First, check if the peer already exists by trying to get its ID.
-	query := `SELECT id FROM peers WHERE peer_id = $1`
-	err = tx.QueryRow(ctx, query, peerID).Scan(&peerUUID)
+	selectQuery := "SELECT id FROM peers WHERE peer_id = ?"
+	err = tx.QueryRowContext(ctx, selectQuery, peerID).Scan(&peerUUID)
 
-	if err == nil {
-		// --- PEER EXISTS ---
-		// The peer was found, so we just update their status to online.
-		updateQuery := `UPDATE peers SET is_online = true, last_seen = $1, multiaddrs = $2 WHERE id = $3`
-		_, updateErr := tx.Exec(ctx, updateQuery, now, multiaddrs, peerUUID)
-		if updateErr != nil {
-			return uuid.Nil, fmt.Errorf("failed to update existing peer: %w", updateErr)
+	if err == sql.ErrNoRows {
+		// Peer doesn't exist, insert new one and get the UUID
+		_, err = tx.ExecContext(ctx, upsertQuery, peerID, name, now, now)
+		if err != nil {
+			fmt.Println("debugging 16")
+			return 0, fmt.Errorf("failed to upsert peer: %w", err)
 		}
 
-	} else if errors.Is(err, pgx.ErrNoRows) {
-		// --- PEER IS NEW ---
-		// The peer was not found, so we insert a new record for them.
-		insertPeerQuery := `
-            INSERT INTO peers (peer_id, name, multiaddrs, is_online, last_seen, created_at)
-            VALUES ($1, $2, $3, true, $4, $4)
-            RETURNING id
-        `
-		insertErr := tx.QueryRow(ctx, insertPeerQuery, peerID, name, multiaddrs, now).Scan(&peerUUID)
-		if insertErr != nil {
-			return uuid.Nil, fmt.Errorf("failed to insert new peer: %w", insertErr)
-		}
+		// ADDING THESE LINES OF CODE AS DEBUGING PROBLEM
 
-		// Also insert the initial trust score for the new peer.
-		insertTrustQuery := `INSERT INTO trust_scores (peer_id, score, updated_at) VALUES ($1, 0.50, $2)`
-		_, trustErr := tx.Exec(ctx, insertTrustQuery, peerUUID, now)
-		if trustErr != nil {
-			return uuid.Nil, fmt.Errorf("failed to insert trust score: %w", trustErr)
+		err = tx.QueryRowContext(ctx, selectQuery, peerID).Scan(&peerUUID)
+		if err != nil {
+			fmt.Println("debugging 100")
+			return 0, fmt.Errorf("failed to get peer UUID after insert: %w", err)
 		}
-
-	} else {
-		// --- UNEXPECTED ERROR ---
-		// An unexpected database error occurred during the initial check.
-		return uuid.Nil, fmt.Errorf("failed to check for peer existence: %w", err)
+	} else if err != nil {
+		// Handle other errors
+		fmt.Println("debugging 101")
+		return 0, fmt.Errorf("failed to query existing peer: %w", err)
 	}
 
-	// If everything succeeded, commit the transaction and return the peer's UUID.
-	if err := tx.Commit(ctx); err != nil {
-		return uuid.Nil, fmt.Errorf("failed to commit transaction: %w", err)
+	//  This queryrowcontext expects return too so use execontent becoz no retunr clause in sqlite
+	// err = tx.QueryRowContext(ctx, upsertQuery, peerID, name, multiaddrs, now, now).Scan(&peerUUID)
+
+	fmt.Println("debugging 103")
+	if err != nil {
+		fmt.Println("debugging 102")
+		return 0, fmt.Errorf("failed to upsert peer: %w", err)
 	}
+	fmt.Println("debugging 17")
+	// Handle trust score insertion for new peers only
+	trustQuery := `
+        INSERT INTO trust_scores (peer_id, score, updated_at) 
+        VALUES (?, 0.50, ?)
+        ON CONFLICT (peer_id) DO NOTHING
+    `
+	fmt.Println("debugging 18")
+	_, err = tx.ExecContext(ctx, trustQuery, peerID, now) // use peerID not peerUUID
+	fmt.Println("debugging 19")
+	if err != nil {
+		fmt.Println("debugging 20")
+		return 0, fmt.Errorf("failed to handle trust score: %w", err)
+	}
+	fmt.Println("debugging 10001")
+	err = tx.Commit()
+	if err != nil {
+		fmt.Println("debugging commit error")
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	fmt.Println("debugging transaction committed successfully")
+
 	return peerUUID, nil
-}
-
-// FindPeersByIDs returns peer details for specific peer IDs
-func (r *Repository) FindPeersByIDs(ctx context.Context, peerIDs []string) ([]Peer, error) {
-	if len(peerIDs) == 0 {
-		return []Peer{}, nil
-	}
-
-	// Create placeholder string for the IN clause
-	placeholders := make([]string, len(peerIDs))
-	args := make([]interface{}, len(peerIDs))
-	for i, peerID := range peerIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = peerID
-	}
-
-	query := fmt.Sprintf(`
-		SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at 
-		FROM peers 
-		WHERE peer_id IN (%s)
-	`, strings.Join(placeholders, ","))
-
-	rows, err := r.DB.Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var peers []Peer
-	for rows.Next() {
-		var peer Peer
-		if err := rows.Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt); err != nil {
-			return nil, err
-		}
-		peers = append(peers, peer)
-	}
-
-	return peers, nil
 }
 
 // currently online peers ko return karta hai
 func (r *Repository) FindOnlinePeers(ctx context.Context) ([]Peer, error) {
-	query := `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE is_online = true`
-	rows, err := r.DB.Query(ctx, query)
+	var multiaddrsStr string
+	query := `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE is_online = 1`
+	fmt.Println("GG 1")
+	rows, err := r.DB.QueryContext(ctx, query)
+	fmt.Println("GG 2")
 	if err != nil {
+		fmt.Println("GG 3")
 		return nil, err
 	}
 	defer rows.Close()
+	fmt.Println("GG 4")
 
 	var peers []Peer
 	for rows.Next() {
 		var peer Peer
-		if err := rows.Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt); err != nil {
+		fmt.Println("GG 5")
+		if err := rows.Scan(&peer.ID, &peer.PeerID, &peer.Name, &multiaddrsStr, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt); err != nil {
 			return nil, err
 		}
+		peer.Multiaddrs = parseMultiaddrs(multiaddrsStr)
+		fmt.Println("GG 6")
 		peers = append(peers, peer)
 	}
 	return peers, rows.Err()
 }
 
+func parseMultiaddrs(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+
+	// If it's JSON format like ["addr1", "addr2"]
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		var result []string
+		if err := json.Unmarshal([]byte(s), &result); err == nil {
+			return result
+		}
+	}
+
+	// If it's comma-separated like "addr1,addr2,addr3"
+	parts := strings.Split(s, ",")
+	// Trim whitespace from each part
+	for i, part := range parts {
+		parts[i] = strings.TrimSpace(part)
+	}
+	return parts
+}
+
 // Jab koi peer disconnect kare, use offline mark karne ke liye
 func (r *Repository) SetPeerOffline(ctx context.Context, peerID string) error {
 	now := time.Now()
-	_, err := r.DB.Exec(ctx,
-		`UPDATE peers SET is_online=false, last_seen=$1 WHERE peer_id=$2`,
+	_, err := r.DB.ExecContext(ctx,
+		`UPDATE peers SET is_online=0, last_seen=? WHERE peer_id=?`,
 		now, peerID)
 	return err
 }
@@ -153,14 +168,32 @@ func (r *Repository) SetPeerOffline(ctx context.Context, peerID string) error {
 // Server start hone par sab peers ko offline mark karta hai
 // tracker ko jab host karenge aur restart karna pada toh saare peeer disconnect ho jaenge aur offline mark ho jaenge
 func (r *Repository) MarkAllPeersOffline(ctx context.Context) error {
-	_, err := r.DB.Exec(ctx, `UPDATE peers SET is_online=false WHERE is_online=true`)
+	fmt.Println("nde5")
+
+	// Add these debug checks:
+	if r == nil {
+		fmt.Println("ERROR: Repository r is nil!")
+		return fmt.Errorf("repository is nil")
+	}
+	fmt.Println(r)
+
+	if r.DB == nil {
+		fmt.Println("ERROR: r.DB is nil!")
+		return fmt.Errorf("database connection is nil")
+	}
+
+	fmt.Println("DEBUG: Repository and DB are not nil, attempting query...")
+
+	_, err := r.DB.ExecContext(ctx, `UPDATE peers SET is_online=0 WHERE is_online=1`)
+
+	fmt.Println("nde6")
 	return err
 }
 
 // Peer ki full info return karta hai DB ID ke basis par
-func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID uuid.UUID) (*Peer, error) {
+func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID string) (*Peer, error) {
 	var peer Peer
-	err := r.DB.QueryRow(ctx, `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE id = $1`, peerDBID).Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt)
+	err := r.DB.QueryRowContext(ctx, `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE id = ?`, peerDBID).Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -169,31 +202,42 @@ func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID uuid.UUID) 
 
 // File ko DB mein insert karta hai (hash, size, type etc. ke saath)
 // Aur agar file peehle se exit kar rhi hai toh name update kar dega (hash compare karne ke baad)
-func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, fileSize int64, contentType string) (uuid.UUID, error) {
-	var fileID uuid.UUID
-	err := r.DB.QueryRow(ctx, `SELECT id FROM files WHERE file_hash = $1`, fileHash).Scan(&fileID)
-	if err == nil {
-		return fileID, nil // File exists
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, err
+func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, fileSize int64, contentType string) (string, error) {
+	fileID := uuid.New().String()
+	var existingID string
+	err := r.DB.QueryRowContext(ctx, `SELECT id FROM files WHERE file_hash = ?`, fileHash).Scan(&existingID)
+	if err != nil {
+		log.Println("error : ", err)
 	}
 
 	// File does not exist, insert it and return the new ID.
-	var contentTypePtr *string
-	if contentType != "" {
-		contentTypePtr = &contentType
+	_, err = r.DB.ExecContext(ctx, `
+        INSERT INTO files (
+            id,
+            file_hash,
+            filename,
+            file_size,
+            content_type,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+    `,
+		fileID, // ← your generated UUID
+		fileHash,
+		filename,
+		fileSize,
+		contentType,
+		time.Now(),
+	)
+	if err != nil {
+		return "", err
 	}
-	err = r.DB.QueryRow(ctx,
-		`INSERT INTO files (file_hash, filename, file_size, content_type, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		fileHash, filename, fileSize, contentTypePtr, time.Now()).Scan(&fileID)
 	return fileID, err
 }
 
 // Tracker par available saari files ka list deta hai
 func (r *Repository) FindAllFiles(ctx context.Context) ([]File, error) {
 	query := `SELECT id, file_hash, filename, file_size, content_type, created_at FROM files ORDER BY created_at DESC`
-	rows, err := r.DB.Query(ctx, query)
+	rows, err := r.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -212,44 +256,38 @@ func (r *Repository) FindAllFiles(ctx context.Context) ([]File, error) {
 
 // peer ki chosen file tracker pe register karta hai
 // peer_id + file_id ka combination unique relation store hota hai
-func (r *Repository) InsertPeerFile(ctx context.Context, peerLibp2pID string, fileID uuid.UUID) (uuid.UUID, error) {
-	var peerUUID uuid.UUID
-	err := r.DB.QueryRow(ctx, `SELECT id FROM peers WHERE peer_id = $1`, peerLibp2pID).Scan(&peerUUID)
+func (r *Repository) InsertPeerFile(ctx context.Context, peerLibp2pID string, fileID string) (string, error) {
+	peerUUID := uuid.New().String()
+	err := r.DB.QueryRowContext(ctx, `SELECT id FROM peers WHERE peer_id = ?`, peerLibp2pID).Scan(&peerUUID)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("failed to find peer with peer_id=%s: %w", peerLibp2pID, err)
+		return "", fmt.Errorf("failed to find peer with peer_id=%s: %w", peerLibp2pID, err)
 	}
-	var peerFileID uuid.UUID
+	peerFileID := uuid.New().String()
 	// insert a new file or pehle se exist kar rhi hai toh woh fetch karta hai.
 	query := `
-        WITH ins AS (
-            INSERT INTO peer_files (peer_id, file_id, announced_at)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (peer_id, file_id) DO NOTHING
-            RETURNING id
-        )
-        SELECT id FROM ins
-        UNION ALL
-        SELECT id FROM peer_files WHERE peer_id = $1 AND file_id = $2 AND NOT EXISTS (SELECT 1 FROM ins)
+        INSERT OR IGNORE INTO peer_files (peer_id, file_id, announced_at)
+        VALUES (?, ?, ?);
+        SELECT id FROM peer_files WHERE peer_id = ? AND file_id = ?;
     `
-	err = r.DB.QueryRow(ctx, query, peerUUID, fileID, time.Now()).Scan(&peerFileID)
+	err = r.DB.QueryRowContext(ctx, query, peerUUID, fileID, time.Now()).Scan(&peerFileID)
 	if err != nil {
 		log.Printf("[Repository] InsertPeerFile error for peerUUID %s and fileID %s: %v", peerUUID, fileID, err)
-		return uuid.Nil, err
+		return "", err
 	}
 
 	return peerFileID, nil
 }
 
 // Kisi file ke liye saare online peers dikhata hai (abhi ke liye basic trust score dikhata hai)
-func (r *Repository) FindOnlineFilePeersByID(ctx context.Context, fileID uuid.UUID) ([]PeerFile, error) {
+func (r *Repository) FindOnlineFilePeersByID(ctx context.Context, fileID string) ([]PeerFile, error) {
 	query := `
         SELECT pf.id, pf.file_id, pf.peer_id, pf.announced_at, COALESCE(ts.score, 0.5) as score
         FROM peer_files pf
         JOIN peers p ON pf.peer_id = p.id
         LEFT JOIN trust_scores ts ON p.id = ts.peer_id
-        WHERE pf.file_id = $1 AND p.is_online = true
+        WHERE pf.file_id = ? AND p.is_online = 1
     `
-	rows, err := r.DB.Query(ctx, query, fileID)
+	rows, err := r.DB.QueryContext(ctx, query, fileID)
 	if err != nil {
 		return nil, err
 	}
