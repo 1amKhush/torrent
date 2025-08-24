@@ -61,14 +61,12 @@ func main() {
 		log.Fatal("Database initialization failed")
 	}
 
-	// Fixed: p2p.NewHost returns 3 values (host, dht, error)
 	h, d, err := p2p.NewHost(ctx, "/ip4/0.0.0.0/tcp/0")
 	if err != nil {
 		log.Fatal("Failed to create libp2p host:", err)
 	}
 	defer h.Close()
 
-	// Fixed: Bootstrap the DHT
 	go func() {
 		if err := p2p.Bootstrap(ctx, h, d); err != nil {
 			log.Printf("Error bootstrapping DHT: %v", err)
@@ -79,10 +77,8 @@ func main() {
 	repo := db.NewRepository(DB)
 	client := NewClient(h, d, repo)
 
-	// Register the signaling protocol handler
 	p2p.RegisterSignalingProtocol(h, client.handleWebRTCOffer)
 
-	// Start the command loop
 	client.commandLoop()
 }
 
@@ -168,7 +164,7 @@ func (c *Client) printInstructions() {
 
 func (c *Client) addFile(filePath string) error {
 	ctx := context.Background()
-	
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -180,7 +176,6 @@ func (c *Client) addFile(filePath string) error {
 		return fmt.Errorf("failed to get file info: %w", err)
 	}
 
-	// Calculate file hash
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
 		return fmt.Errorf("failed to calculate hash: %w", err)
@@ -189,7 +184,6 @@ func (c *Client) addFile(filePath string) error {
 	fileHashBytes := hasher.Sum(nil)
 	fileHashStr := hex.EncodeToString(fileHashBytes)
 
-	// Create CID from hash
 	mhash, err := multihash.Encode(fileHashBytes, multihash.SHA2_256)
 	if err != nil {
 		return fmt.Errorf("failed to create multihash: %w", err)
@@ -197,12 +191,10 @@ func (c *Client) addFile(filePath string) error {
 
 	fileCID := cid.NewCidV1(cid.Raw, mhash)
 
-	// Fixed: Store in local database
 	if err := c.db.AddLocalFile(ctx, fileCID.String(), info.Name(), info.Size(), filePath, fileHashStr); err != nil {
 		return fmt.Errorf("failed to store file metadata: %w", err)
 	}
 
-	// Store file info for sharing
 	c.sharingFiles[fileCID.String()] = &FileInfo{
 		FilePath: filePath,
 		Hash:     fileHashStr,
@@ -210,7 +202,6 @@ func (c *Client) addFile(filePath string) error {
 		Name:     info.Name(),
 	}
 
-	// Announce to DHT
 	log.Printf("Announcing file %s with CID %s to DHT...", info.Name(), fileCID.String())
 	provideCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -231,7 +222,6 @@ func (c *Client) addFile(filePath string) error {
 
 func (c *Client) listLocalFiles() {
 	ctx := context.Background()
-	// Fixed: GetLocalFiles method call
 	files, err := c.db.GetLocalFiles(ctx)
 	if err != nil {
 		log.Printf("Error retrieving files: %v", err)
@@ -254,7 +244,6 @@ func (c *Client) listLocalFiles() {
 }
 
 func (c *Client) searchFiles(query string) error {
-	// If query looks like a CID, search for it directly
 	if strings.HasPrefix(query, "bafy") || strings.HasPrefix(query, "Qm") {
 		return c.searchByCID(query)
 	}
@@ -262,14 +251,13 @@ func (c *Client) searchFiles(query string) error {
 	fmt.Printf("Searching for files containing '%s'...\n", query)
 	fmt.Println("Note: Direct filename search requires content indexing.")
 	fmt.Println("Try using the CID if you have it, or check with known peers.")
-	
+
 	return nil
 }
 
 func (c *Client) searchByCID(cidStr string) error {
 	ctx := context.Background()
-	
-	// Parse CID
+
 	fileCID, err := cid.Decode(cidStr)
 	if err != nil {
 		return fmt.Errorf("invalid CID: %w", err)
@@ -277,14 +265,10 @@ func (c *Client) searchByCID(cidStr string) error {
 
 	fmt.Printf("Searching for CID: %s\n", fileCID.String())
 
-	// Fixed: FindProviders returns (chan peer.AddrInfo, error)
 	findCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	providersChan, err := c.dht.FindProviders(findCtx, fileCID)
-	if err != nil {
-		return fmt.Errorf("error finding providers: %w", err)
-	}
+	providersChan := c.dht.FindProvidersAsync(findCtx, fileCID, 0)
 
 	var foundPeers []peer.AddrInfo
 	for provider := range providersChan {
@@ -305,8 +289,7 @@ func (c *Client) searchByCID(cidStr string) error {
 
 func (c *Client) downloadFile(cidStr string) error {
 	ctx := context.Background()
-	
-	// Parse CID
+
 	fileCID, err := cid.Decode(cidStr)
 	if err != nil {
 		return fmt.Errorf("invalid CID: %w", err)
@@ -314,18 +297,14 @@ func (c *Client) downloadFile(cidStr string) error {
 
 	fmt.Printf("Looking for providers of CID: %s\n", fileCID.String())
 
-	// Fixed: FindProviders returns (chan peer.AddrInfo, error)
 	findCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	providersChan, err := c.dht.FindProviders(findCtx, fileCID)
-	if err != nil {
-		return fmt.Errorf("error finding providers: %w", err)
-	}
+	providersChan := c.dht.FindProvidersAsync(findCtx, fileCID, 0)
 
 	var targetPeer peer.AddrInfo
 	found := false
-	
+
 	for provider := range providersChan {
 		if provider.ID != c.host.ID() {
 			targetPeer = provider
@@ -340,13 +319,11 @@ func (c *Client) downloadFile(cidStr string) error {
 
 	fmt.Printf("Found provider %s. Establishing connection...\n", targetPeer.ID)
 
-	// Establish WebRTC connection
 	webrtcPeer, err := c.initiateWebRTCConnection(targetPeer.ID)
 	if err != nil {
 		return fmt.Errorf("failed to establish WebRTC connection: %w", err)
 	}
 
-	// Create download file
 	downloadPath := fmt.Sprintf("%s.download", cidStr)
 	localFile, err := os.Create(downloadPath)
 	if err != nil {
@@ -357,7 +334,6 @@ func (c *Client) downloadFile(cidStr string) error {
 	webrtcPeer.SetFileWriter(localFile)
 	fmt.Printf("Downloading to %s...\n", downloadPath)
 
-	// Request file
 	request := map[string]string{
 		"command": "REQUEST_FILE",
 		"cid":     cidStr,
@@ -374,7 +350,7 @@ func (c *Client) downloadFile(cidStr string) error {
 func (c *Client) listConnectedPeers() {
 	peers := c.host.Network().Peers()
 	fmt.Printf("\n=== Connected Peers (%d) ===\n", len(peers))
-	
+
 	for _, peerID := range peers {
 		conn := c.host.Network().ConnsToPeer(peerID)
 		if len(conn) > 0 {
@@ -386,10 +362,10 @@ func (c *Client) listConnectedPeers() {
 
 func (c *Client) initiateWebRTCConnection(targetPeerID peer.ID) (*webRTC.WebRTCPeer, error) {
 	log.Printf("Creating signaling stream to peer %s...", targetPeerID)
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	
+
 	s, err := c.host.NewStream(ctx, targetPeerID, p2p.SignalingProtocolID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create signaling stream: %w", err)
@@ -404,7 +380,6 @@ func (c *Client) initiateWebRTCConnection(targetPeerID peer.ID) (*webRTC.WebRTCP
 	webRTCPeer.SetSignalingStream(s)
 	c.addWebRTCPeer(targetPeerID, webRTCPeer)
 
-	// Create and send offer
 	offer, err := webRTCPeer.CreateOffer()
 	if err != nil {
 		webRTCPeer.Close()
@@ -417,7 +392,6 @@ func (c *Client) initiateWebRTCConnection(targetPeerID peer.ID) (*webRTC.WebRTCP
 		return nil, fmt.Errorf("failed to send offer: %w", err)
 	}
 
-	// Wait for answer
 	var answer string
 	decoder := json.NewDecoder(s)
 	if err := decoder.Decode(&answer); err != nil {
@@ -430,7 +404,6 @@ func (c *Client) initiateWebRTCConnection(targetPeerID peer.ID) (*webRTC.WebRTCP
 		return nil, fmt.Errorf("failed to set answer: %w", err)
 	}
 
-	// Wait for connection
 	if err := webRTCPeer.WaitForConnection(30 * time.Second); err != nil {
 		webRTCPeer.Close()
 		return nil, fmt.Errorf("failed to establish connection: %w", err)
@@ -484,7 +457,6 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, p *webRTC.W
 			p.Close()
 		}
 	} else {
-		// Binary data (file chunk)
 		if writer := p.GetFileWriter(); writer != nil {
 			if _, err := writer.Write(msg.Data); err != nil {
 				log.Printf("Error writing file chunk: %v", err)
