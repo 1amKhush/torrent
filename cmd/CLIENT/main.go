@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,19 +20,22 @@ import (
 	webRTC "torrentium/Internal/client"
 	"torrentium/internal/db"
 	"torrentium/internal/p2p"
-	torrentfile "torrentium/internal/torrent"
+	//torrentfile "torrentium/internal/torrent"
 	"torrentium/internal/tracker"
 
+	"github.com/ipfs/go-cid"
 	"github.com/joho/godotenv"
-	//"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multihash"
 	"github.com/pion/webrtc/v3"
 )
 
 type Client struct {
 	host            host.Host
+	dht             *dht.IpfsDHT
 	webRTCPeers     map[peer.ID]*webRTC.WebRTCPeer
 	peersMux        sync.RWMutex
 	sharingFiles    map[string]string // map[fileID]filePath
@@ -40,7 +44,8 @@ type Client struct {
 }
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: Could not load .env file: %v", err)
@@ -53,21 +58,24 @@ func main() {
 	}
 	t := tracker.NewTracker(DB)
 
-	// Create libp2p host
-	h, err := p2p.NewHost(ctx, "/ip4/0.0.0.0/tcp/0")
+	// Create libp2p host with DHT
+	h, d, err := p2p.NewHost(ctx, "/ip4/0.0.0.0/tcp/0")
 	if err != nil {
 		log.Fatal("Failed to create libp2p host:", err)
 	}
 	defer h.Close()
 
-	// Announce self to the tracker (database)
-	if err := t.AddPeer(ctx, h.ID().String(), "default-name", nil); err != nil {
-		log.Fatalf("Failed to announce peer to tracker: %v", err)
-	}
+	// Bootstrap the DHT
+	go func() {
+		if err := p2p.Bootstrap(ctx, h, d); err != nil {
+			log.Printf("Error bootstrapping DHT: %v", err)
+		}
+	}()
+
 
 	setupGracefulShutdown(h)
 	
-	client := NewClient(h)
+	client := NewClient(h, d)
 
 	// Register the signaling protocol handler
 	p2p.RegisterSignalingProtocol(h, client.handleWebRTCOffer)
@@ -77,9 +85,10 @@ func main() {
 }
 
 
-func NewClient(h host.Host) *Client {
+func NewClient(h host.Host, d *dht.IpfsDHT) *Client {
 	return &Client{
 		host:            h,
+		dht:             d,
 		webRTCPeers:     make(map[peer.ID]*webRTC.WebRTCPeer),
 		sharingFiles:    make(map[string]string),
 		activeDownloads: make(map[string]*os.File),
@@ -116,7 +125,7 @@ func (c *Client) commandLoop(t *tracker.Tracker) {
 			if len(args) != 1 {
 				err = errors.New("usage: get <file_id>")
 			} else {
-				err = c.getFile(args[0], t)
+				err = c.getFile(args[0])
 			}
 		case "exit":
 			return
@@ -146,22 +155,35 @@ func (c *Client) addFile(filePath string, t *tracker.Tracker) error {
 	if _, err := io.Copy(hasher, file); err != nil {
 		return err
 	}
-	fileHash := fmt.Sprintf("%x", hasher.Sum(nil))
+	fileHashBytes := hasher.Sum(nil)
+	fileHashStr := fmt.Sprintf("%x", fileHashBytes)
 
-	if err := torrentfile.CreateTorrentFile(filePath); err != nil {
-		log.Printf("Warning: failed to create .torrent file: %v", err)
+	// Create a CID from the file hash
+	mhash, err := multihash.Encode(fileHashBytes, multihash.SHA2_256)
+	if err != nil {
+		return err
 	}
+	cid := cid.NewCidV1(cid.Raw, mhash)
 
-	// Announce the file to the tracker with our own peer ID
-	fileID, err := t.AddFileWithPeer(ctx, fileHash, info.Name(), info.Size(), c.host.ID().String())
+	// Announce to the DHT that we are providing this file
+	log.Printf("Announcing file with CID %s to the DHT...", cid.String())
+	provideCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err := c.dht.Provide(provideCtx, cid, true); err != nil {
+		return fmt.Errorf("failed to provide file on DHT: %w", err)
+	}
+	log.Println("Successfully announced file to the DHT.")
+
+
+	// Still add to local DB for `list` command functionality
+	fileID, err := t.AddFileWithPeer(ctx, fileHashStr, info.Name(), info.Size(), c.host.ID().String())
 	if err != nil {
 		return fmt.Errorf("could not add file with the associated peer: %w", err)
 	}
 
-	// Keep track of files we are sharing
 	c.sharingFiles[fileID] = filePath
 
-	fmt.Printf("File '%s' announced successfully and is ready to be shared.\n", filepath.Base(filePath))
+	fmt.Printf("File '%s' (CID: %s) announced successfully and is ready to be shared.\n", filepath.Base(filePath), cid.String())
 	return nil
 }
 
@@ -173,48 +195,65 @@ func (c *Client) listFiles(t *tracker.Tracker) error {
 	}
 
 	if len(files) == 0 {
-		fmt.Println("No files available on the tracker.")
+		fmt.Println("No files available in the local tracker DB.")
 		return nil
 	}
 
-	fmt.Println("\nAvailable Files:")
+	fmt.Println("\nAvailable Files (from local DB):")
 	for _, file := range files {
 		fmt.Println("--------------------")
-		fmt.Printf("  ID: %s\n  Name: %s\n  Size: %s\n", file.ID, file.Filename, webRTC.FormatFileSize(file.FileSize))
+		fmt.Printf("  ID: %s\n  Name: %s\n  Size: %s\n", file.FileHash, file.Filename, webRTC.FormatFileSize(file.FileSize))
 	}
 	fmt.Println("--------------------")
 	return nil
 }
 
-func (c *Client) getFile(fileID string, t *tracker.Tracker) error {
+func (c *Client) getFile(fileID string) error {
 	ctx := context.Background()
-	log.Printf("Searching for peers with file ID: %s", fileID)
-	peers, err := t.FindPeersForFile(ctx, fileID)
+	
+	// For DHT, we need the CID. The fileID from the list command is the file hash.
+	fileHashBytes, err := hex.DecodeString(fileID)
+	if err != nil {
+		return fmt.Errorf("invalid file ID/hash provided. Make sure to use the hash from the 'list' command: %w", err)
+	}
+	mhash, err := multihash.Encode(fileHashBytes, multihash.SHA2_256)
+	if err != nil {
+		return err
+	}
+	cidToGet := cid.NewCidV1(cid.Raw, mhash)
+
+	log.Printf("Searching for peers with CID: %s", cidToGet.String())
+	
+	findCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	peers, err := c.dht.FindProviders(findCtx, cidToGet)
 	if err != nil {
 		return err
 	}
 
-	if len(peers) == 0 {
-		return fmt.Errorf("no online peers found for file ID: %s", fileID)
+	var targetPeer peer.AddrInfo
+	found := false
+	for p := range peers {
+		if p.ID != c.host.ID() {
+			targetPeer = p
+			found = true
+			break
+		}
 	}
 
-	// For simplicity, we'll try to connect to the first peer found
-	targetPeer := peers[0]
-	targetPeerID, err := peer.Decode(targetPeer.PeerID)
+	if !found {
+		return fmt.Errorf("no other peers found for CID: %s", cidToGet.String())
+	}
+	
+	log.Printf("Found peer %s. Initiating WebRTC connection...", targetPeer.ID)
+
+	webrtcPeer, err := c.initiateWebRTCConnection(targetPeer.ID)
 	if err != nil {
-		return fmt.Errorf("failed to decode target peer ID '%s': %w", targetPeer.PeerID, err)
+		return fmt.Errorf("could not establish WebRTC connection with peer %s: %w", targetPeer.ID, err)
 	}
+	log.Printf("WebRTC connection established with %s!", targetPeer.ID)
 
-	log.Printf("Found peer %s. Initiating WebRTC connection...", targetPeerID)
-
-	webrtcPeer, err := c.initiateWebRTCConnection(targetPeerID)
-	if err != nil {
-		return fmt.Errorf("could not establish WebRTC connection with peer %s: %w", targetPeerID, err)
-	}
-	log.Printf("WebRTC connection established with %s!", targetPeerID)
-
-	// Prepare a local file to write the downloaded chunks
-	// TODO: Get the real filename from the tracker instead of using the ID
 	localFile, err := os.Create(fileID + ".download")
 	if err != nil {
 		webrtcPeer.Close()
