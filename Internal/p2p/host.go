@@ -32,16 +32,54 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	}
 
 	var idht *dht.IpfsDHT
+	fmt.Println("debugging 11")
 
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-			idht, err = dht.New(ctx, h)
-			return idht, err
-		}),
-		libp2p.EnableAutoRelay(),
 	)
+	if err != nil {
+		panic(err)
+	}
+
+	// Create DHT with reference to host `h`
+	// idht, err := dht.New(ctx, h)
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	h, err = libp2p.New(
+		libp2p.Identity(priv),
+		libp2p.ListenAddrs(maddr),
+		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+			return idht, nil
+		}),
+		libp2p.EnableAutoRelayWithPeerSource(
+			func(ctx context.Context, num int) <-chan peer.AddrInfo {
+				ch := make(chan peer.AddrInfo, num)
+				go func() {
+					defer close(ch)
+
+					peers, err := idht.GetClosestPeers(ctx, h.ID().String()) // ✅ h is available now
+					if err != nil {
+						return
+					}
+
+					for i := 0; i < num; i++ {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+							info := peer.AddrInfo{ID: peers[i]}
+							ch <- info
+						}
+					}
+				}()
+				return ch
+			},
+		),
+	)
+	fmt.Println("debugging 14")
 
 	if err != nil {
 		return nil, nil, err
