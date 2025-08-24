@@ -54,7 +54,7 @@ func (r *Repository) UpsertPeer(ctx context.Context, peerID, name string) (int64
 
 	if err == sql.ErrNoRows {
 		// Peer doesn't exist, insert new one and get the UUID
-		_, err = tx.ExecContext(ctx, upsertQuery, peerID, name, now, now)
+		_, err = tx.ExecContext(ctx, upsertQuery, peerID, name, "", now, now)
 		if err != nil {
 			fmt.Println("debugging 16")
 			return 0, fmt.Errorf("failed to upsert peer: %w", err)
@@ -193,24 +193,35 @@ func (r *Repository) MarkAllPeersOffline(ctx context.Context) error {
 // Peer ki full info return karta hai DB ID ke basis par
 func (r *Repository) GetPeerInfoByDBID(ctx context.Context, peerDBID string) (*Peer, error) {
 	var peer Peer
-	err := r.DB.QueryRowContext(ctx, `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE id = ?`, peerDBID).Scan(&peer.ID, &peer.PeerID, &peer.Name, &peer.Multiaddrs, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt)
+	var multiaddrsStr sql.NullString
+	err := r.DB.QueryRowContext(ctx, `SELECT id, peer_id, name, multiaddrs, is_online, last_seen, created_at FROM peers WHERE id = ?`, peerDBID).Scan(&peer.ID, &peer.PeerID, &peer.Name, &multiaddrsStr, &peer.IsOnline, &peer.LastSeen, &peer.CreatedAt)
 	if err != nil {
 		return nil, err
+	}
+	if multiaddrsStr.Valid {
+		peer.Multiaddrs = parseMultiaddrs(multiaddrsStr.String)
 	}
 	return &peer, nil
 }
 
+
 // File ko DB mein insert karta hai (hash, size, type etc. ke saath)
 // Aur agar file peehle se exit kar rhi hai toh name update kar dega (hash compare karne ke baad)
 func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, fileSize int64, contentType string) (string, error) {
-	fileID := uuid.New().String()
 	var existingID string
 	err := r.DB.QueryRowContext(ctx, `SELECT id FROM files WHERE file_hash = ?`, fileHash).Scan(&existingID)
-	if err != nil {
-		log.Println("error : ", err)
+
+	if err == nil {
+		// File with this hash already exists, return its ID
+		return existingID, nil
+	} else if err != sql.ErrNoRows {
+		// An actual error occurred
+		return "", err
 	}
 
+
 	// File does not exist, insert it and return the new ID.
+	fileID := uuid.New().String()
 	_, err = r.DB.ExecContext(ctx, `
         INSERT INTO files (
             id,
@@ -231,7 +242,7 @@ func (r *Repository) InsertFile(ctx context.Context, fileHash, filename string, 
 	if err != nil {
 		return "", err
 	}
-	return fileID, err
+	return fileID, nil
 }
 
 // Tracker par available saari files ka list deta hai
@@ -257,21 +268,30 @@ func (r *Repository) FindAllFiles(ctx context.Context) ([]File, error) {
 // peer ki chosen file tracker pe register karta hai
 // peer_id + file_id ka combination unique relation store hota hai
 func (r *Repository) InsertPeerFile(ctx context.Context, peerLibp2pID string, fileID string) (string, error) {
-	peerUUID := uuid.New().String()
-	err := r.DB.QueryRowContext(ctx, `SELECT id FROM peers WHERE peer_id = ?`, peerLibp2pID).Scan(&peerUUID)
+	var peerDBID string
+	err := r.DB.QueryRowContext(ctx, `SELECT id FROM peers WHERE peer_id = ?`, peerLibp2pID).Scan(&peerDBID)
 	if err != nil {
 		return "", fmt.Errorf("failed to find peer with peer_id=%s: %w", peerLibp2pID, err)
 	}
-	peerFileID := uuid.New().String()
+
+	var peerFileID string
 	// insert a new file or pehle se exist kar rhi hai toh woh fetch karta hai.
 	query := `
-        INSERT OR IGNORE INTO peer_files (peer_id, file_id, announced_at)
-        VALUES (?, ?, ?);
-        SELECT id FROM peer_files WHERE peer_id = ? AND file_id = ?;
+        INSERT INTO peer_files (id, peer_id, file_id, announced_at)
+        VALUES (?, ?, ?, ?)
+		ON CONFLICT(peer_id, file_id) DO NOTHING
     `
-	err = r.DB.QueryRowContext(ctx, query, peerUUID, fileID, time.Now()).Scan(&peerFileID)
+	newID := uuid.New().String()
+	_, err = r.DB.ExecContext(ctx, query, newID, peerDBID, fileID, time.Now())
 	if err != nil {
-		log.Printf("[Repository] InsertPeerFile error for peerUUID %s and fileID %s: %v", peerUUID, fileID, err)
+		return "", err
+	}
+
+	// Get the ID of the (possibly existing) row
+	selectQuery := `SELECT id FROM peer_files WHERE peer_id = ? AND file_id = ?`
+	err = r.DB.QueryRowContext(ctx, selectQuery, peerDBID, fileID).Scan(&peerFileID)
+	if err != nil {
+		log.Printf("[Repository] InsertPeerFile error for peerDBID %s and fileID %s: %v", peerDBID, fileID, err)
 		return "", err
 	}
 
@@ -284,7 +304,7 @@ func (r *Repository) FindOnlineFilePeersByID(ctx context.Context, fileID string)
         SELECT pf.id, pf.file_id, pf.peer_id, pf.announced_at, COALESCE(ts.score, 0.5) as score
         FROM peer_files pf
         JOIN peers p ON pf.peer_id = p.id
-        LEFT JOIN trust_scores ts ON p.id = ts.peer_id
+        LEFT JOIN trust_scores ts ON p.peer_id = ts.peer_id
         WHERE pf.file_id = ? AND p.is_online = 1
     `
 	rows, err := r.DB.QueryContext(ctx, query, fileID)

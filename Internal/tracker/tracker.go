@@ -3,7 +3,6 @@ package tracker
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	db "torrentium/internal/db"
 
@@ -11,13 +10,7 @@ import (
 )
 
 type Tracker struct {
-	// peers    map[string]bool // (In-memory map )jo currently connected peers hai unke IDs ko store karta hai.
 	repo *db.Repository
-	// peersMux sync.RWMutex // peers map ko concurrency clashes se bachane ke liye reead and write Mutex.
-}
-
-type Repository struct {
-	DB *sql.DB
 }
 
 // ek naya tracker instance initialize karte hai
@@ -28,12 +21,8 @@ func NewTracker(DB *sql.DB) *Tracker {
 }
 
 func (t *Tracker) AddPeer(ctx context.Context, peerID, name string, multiaddrs []string) error {
-	// Map ko lock karte hain taaki race conditions na ho.
-
 	_, err := t.repo.UpsertPeer(ctx, peerID, name)
-	fmt.Println("debugging 1000")
 	if err != nil {
-		fmt.Println("debugging 22")
 		log.Printf("Failed to upsert peer %s: %v", peerID, err)
 		return err
 	}
@@ -47,13 +36,36 @@ func (t *Tracker) AddFileWithPeer(ctx context.Context, fileHash, filename string
 	if err != nil {
 		return "", err
 	}
+
 	// Fir `peer_files` table mein entry banakar file aur peer ko link karte hain.
-	// TODO: Replace "peerID" with the actual peer ID variable as needed.
-	 // Set this to the correct peer ID
-	_, err = t.repo.InsertPeerFile(ctx, fileID, peerID)
+	_, err = t.repo.InsertPeerFile(ctx, peerID, fileID)
 	if err != nil {
 		return "", err
 	}
 
 	return fileID, nil
+}
+
+// GetAllFiles database mein available sabhi files ki list return karta hai.
+func (t *Tracker) GetAllFiles(ctx context.Context) ([]db.File, error) {
+	return t.repo.FindAllFiles(ctx)
+}
+
+// FindPeersForFile finds all online peers that have announced a given file.
+func (t *Tracker) FindPeersForFile(ctx context.Context, fileID string) ([]db.Peer, error) {
+	peerFiles, err := t.repo.FindOnlineFilePeersByID(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+
+	var peers []db.Peer
+	for _, pf := range peerFiles {
+		peerInfo, err := t.repo.GetPeerInfoByDBID(ctx, pf.PeerID)
+		if err != nil {
+			log.Printf("Could not get peer info for DB ID %s: %v", pf.PeerID, err)
+			continue
+		}
+		peers = append(peers, *peerInfo)
+	}
+	return peers, nil
 }

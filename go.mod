@@ -9,7 +9,26 @@ require (
 	github.com/pion/webrtc/v3 v3.2.40
 )
 
-require github.com/filecoin-project/go-clock v0.1.0 // indirect
+require (
+	github.com/filecoin-project/go-clock v0.1.0 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/hashicorp/golang-lru v1.0.2 // indirect
+	github.com/ipfs/boxo v0.33.1 // indirect
+	github.com/ipfs/go-datastore v0.8.2 // indirect
+	github.com/ipld/go-ipld-prime v0.21.0 // indirect
+	github.com/libp2p/go-cidranger v1.1.0 // indirect
+	github.com/libp2p/go-libp2p-kbucket v0.7.0 // indirect
+	github.com/libp2p/go-libp2p-record v0.3.1 // indirect
+	github.com/libp2p/go-libp2p-routing-helpers v0.7.5 // indirect
+	github.com/polydawn/refmt v0.89.0 // indirect
+	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
+	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
+	go.opentelemetry.io/otel v1.37.0 // indirect
+	go.opentelemetry.io/otel/metric v1.37.0 // indirect
+	go.opentelemetry.io/otel/trace v1.37.0 // indirect
+	gonum.org/v1/gonum v0.16.0 // indirect
+)
 
 require (
 	github.com/benbjohnson/clock v1.3.5 // indirect
@@ -37,6 +56,7 @@ require (
 	github.com/libp2p/go-flow-metrics v0.3.0 // indirect
 	github.com/libp2p/go-libp2p v0.43.0
 	github.com/libp2p/go-libp2p-asn-util v0.4.1 // indirect
+	github.com/libp2p/go-libp2p-kad-dht v0.34.0
 	github.com/libp2p/go-msgio v0.3.0 // indirect
 	github.com/libp2p/go-netroute v0.2.2 // indirect
 	github.com/libp2p/go-reuseport v0.4.0 // indirect
