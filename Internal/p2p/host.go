@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	//"strings"
 	"sync"
 
 	"github.com/libp2p/go-libp2p"
@@ -33,6 +32,7 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	}
 
 	var idht *dht.IpfsDHT
+
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
@@ -42,13 +42,13 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 		}),
 		libp2p.EnableAutoRelay(),
 	)
+
 	if err != nil {
 		return nil, nil, err
 	}
 
 	log.Printf("Host created with ID: %s", h.ID())
 	log.Printf("Host listening on: %s/p2p/%s", h.Addrs()[0], h.ID())
-
 	return h, idht, nil
 }
 
@@ -71,8 +71,8 @@ func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
 			}
 		}()
 	}
-	wg.Wait()
 
+	wg.Wait()
 	return nil
 }
 
@@ -92,6 +92,7 @@ func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
 		if err := os.WriteFile(privKeyFile, privBytes, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write private key to file: %w", err)
 		}
+
 		log.Println("Generated new libp2p private key.")
 		return priv, nil
 	} else if err != nil {
