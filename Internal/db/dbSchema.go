@@ -1,42 +1,25 @@
 package db
 
-import (
-	"time"
-)
+import "time"
 
-type Peer struct {
-	ID         string    `db:"id"`
-	PeerID     string    `db:"peer_id"`
-	Name       string    `db:"name"`
-	Multiaddrs []string  `db:"multiaddrs"`
-	IsOnline   bool      `db:"is_online"`
-	LastSeen   time.Time `db:"last_seen"`
-	CreatedAt  time.Time `db:"created_at"`
+// LocalFile represents a file shared by this peer
+type LocalFile struct {
+	ID        string    `db:"id"`
+	CID       string    `db:"cid"`
+	Filename  string    `db:"filename"`
+	FileSize  int64     `db:"file_size"`
+	FilePath  string    `db:"file_path"`
+	FileHash  string    `db:"file_hash"`
+	CreatedAt time.Time `db:"created_at"`
 }
 
-type File struct {
-	ID          string    `db:"id"`
-	FileHash    string    `db:"file_hash"`
-	Filename    string    `db:"filename"`
-	FileSize    int64     `db:"file_size"`
-	ContentType string    `db:"content_type"`
-	CreatedAt   time.Time `db:"created_at"`
+// Download represents a file downloaded by this peer
+type Download struct {
+	ID           string    `db:"id"`
+	CID          string    `db:"cid"`
+	Filename     string    `db:"filename"`
+	FileSize     int64     `db:"file_size"`
+	DownloadPath string    `db:"download_path"`
+	DownloadedAt time.Time `db:"downloaded_at"`
+	Status       string    `db:"status"`
 }
-
-type PeerFile struct {
-    ID         string    `json:"id"`
-    FileID     string    `json:"file_id"`
-    PeerID     string    `json:"peer_id"`
-    AnnouncedAt time.Time `json:"announced_at"`
-    Score      float64   `json:"score"`
-}
-// USELESS
-
-// type TrustScore struct {
-// 	ID                  string    `db:"id"`
-// 	PeerID              string    `db:"peer_id"`
-// 	Score               float64   `db:"score"`
-// 	SuccessfulTransfers int       `db:"successful_transfers"`
-// 	FailedTransfers     int       `db:"failed_transfers"`
-// 	UpdatedAt           time.Time `db:"updated_at"`
-// }

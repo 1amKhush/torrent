@@ -6,53 +6,76 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
+	"sync"
 
 	"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/routing"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-// privKeyFile constant hamari private key file ka naam store karta hai.
-//iss private key se ek unique peerID attch ho jaegi, this solves our reusability of our node
 const privKeyFile = "private_key"
 
-// newHost func ek naya libp2p host bnata hai
-// Yeh private key load ya generate karta hai aur provided address par listen karta hai.
-func NewHost(ctx context.Context, listenAddr string) (host.Host, error) {
+// NewHost creates a new libp2p host with a Kademlia DHT.
+func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, error) {
 	priv, err := loadOrGeneratePrivateKey()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load/generate private key: %w", err)
+		return nil, nil, fmt.Errorf("failed to load/generate private key: %w", err)
 	}
 
 	maddr, err := ma.NewMultiaddr(listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse listen address '%s': %w", listenAddr, err)
+		return nil, nil, fmt.Errorf("failed to parse listen address '%s': %w", listenAddr, err)
 	}
+
+	var idht *dht.IpfsDHT
 
 	h, err := libp2p.New(
-		//private key se host ki identity in the network create ho rhi hai
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
+		libp2p.Routing(func(h host.Host) (routing.PeerRouter, error) {
+			idht, err = dht.New(ctx, h)
+			return idht, err
+		}),
+		libp2p.EnableAutoRelay(),
 	)
+
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	var actualAddrs []string
-	for _, addr := range h.Addrs() {
-		actualAddrs = append(actualAddrs, addr.String())
-	}
-
-	fmt.Printf("✅ Tracker host ID: %s\n", h.ID())
-	fmt.Printf("✅ Tracker listening on: %s/p2p/%s\n", strings.Join(actualAddrs, ", "), h.ID())
-
-	return h, nil
+	log.Printf("Host created with ID: %s", h.ID())
+	log.Printf("Host listening on: %s/p2p/%s", h.Addrs()[0], h.ID())
+	return h, idht, nil
 }
 
-// loadOrGeneratePrivateKey function file se private key load karta hai.
-// Agar private key already present nhi hai toh yeh ek new file generate karta hai
+// Bootstrap connects the host to the public libp2p bootstrap peers.
+func Bootstrap(ctx context.Context, h host.Host, d *dht.IpfsDHT) error {
+	if err := d.Bootstrap(ctx); err != nil {
+		return fmt.Errorf("failed to bootstrap DHT: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	for _, peerAddr := range dht.DefaultBootstrapPeers {
+		peerinfo, _ := peer.AddrInfoFromP2pAddr(peerAddr)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := h.Connect(ctx, *peerinfo); err != nil {
+				log.Printf("Warning: could not connect to bootstrap peer %s: %s", peerinfo.ID, err)
+			} else {
+				log.Printf("Connection established with bootstrap peer %s", peerinfo.ID)
+			}
+		}()
+	}
+
+	wg.Wait()
+	return nil
+}
+
 func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
 	privBytes, err := os.ReadFile(privKeyFile)
 	if os.IsNotExist(err) {
@@ -66,20 +89,16 @@ func loadOrGeneratePrivateKey() (crypto.PrivKey, error) {
 			return nil, err
 		}
 
-		//permissions 0600 - sirf owner hi read/write kar sakta hai
 		if err := os.WriteFile(privKeyFile, privBytes, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write private key to file: %w", err)
 		}
+
 		log.Println("Generated new libp2p private key.")
 		return priv, nil
 	} else if err != nil {
-		return nil, err // Other error, e.g., permissions
+		return nil, err
 	}
 
 	log.Println("Loaded existing libp2p private key.")
 	return crypto.UnmarshalPrivateKey(privBytes)
 }
-
-//Basically Libp2p uses this private key to generate a unique Peer ID. 
-// This ID is derived from the public key and serves as the node's permanent 
-// and verifiable address on the network
