@@ -13,7 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/routing"
+	//"github.com/libp2p/go-libp2p/core/routing"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -51,9 +51,9 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	h, err = libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
-			return idht, nil
-		}),
+		// libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
+		// 	return idht, nil
+		// }),
 		libp2p.EnableAutoRelayWithPeerSource(
 			func(ctx context.Context, num int) <-chan peer.AddrInfo {
 				ch := make(chan peer.AddrInfo, num)
@@ -82,6 +82,16 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	fmt.Println("debugging 14")
 
 	if err != nil {
+		return nil, nil, err
+	}
+
+	idht, err = dht.New(ctx, h)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Bootstrap the DHT
+	if err := idht.Bootstrap(ctx); err != nil {
 		return nil, nil, err
 	}
 

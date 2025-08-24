@@ -103,10 +103,11 @@ func NewClient(h host.Host, d *dht.IpfsDHT, repo *db.Repository) *Client {
 func (c *Client) commandLoop() {
 	scanner := bufio.NewScanner(os.Stdin)
 	c.printInstructions()
-
+	//fmt.Println("ggggh")
 	for {
 		fmt.Print("> ")
 		if !scanner.Scan() {
+			
 			break
 		}
 
