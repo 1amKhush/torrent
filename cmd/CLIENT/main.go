@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	webRTC "torrentium/internal/client"
-	"torrentium/internal/db"
-	"torrentium/internal/p2p"
+	webRTC "torrentium/Internal/client"
+	db "torrentium/Internal/db"
+	p2p "torrentium/Internal/p2p"
 
 	"github.com/ipfs/go-cid"
 	"github.com/joho/godotenv"

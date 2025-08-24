@@ -36,7 +36,7 @@ func NewHost(ctx context.Context, listenAddr string) (host.Host, *dht.IpfsDHT, e
 	h, err := libp2p.New(
 		libp2p.Identity(priv),
 		libp2p.ListenAddrs(maddr),
-		libp2p.Routing(func(h host.Host) (routing.PeerRouter, error) {
+		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
 			idht, err = dht.New(ctx, h)
 			return idht, err
 		}),
