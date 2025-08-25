@@ -30,6 +30,7 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
+// RWMutex => But when one goroutine writes (adds/removes a peer), it blocks all readers and writers until it’s done (ensures consistency).
 type Client struct {
 	host            host.Host
 	dht             *dht.IpfsDHT
@@ -57,25 +58,25 @@ func main() {
 	}
 
 	DB := db.InitDB()
-	fmt.Println("debugging 10")
+	// fmt.Println("debugging 10")
 	if DB == nil {
-		fmt.Println("debugging 8")
+		// fmt.Println("debugging 8")
 		log.Fatal("Database initialization failed")
 	}
-	fmt.Println("debugging 7")
+	// fmt.Println("debugging 7")
 
 	h, d, err := p2p.NewHost(ctx, "/ip4/0.0.0.0/tcp/0")
-	fmt.Println("debugging 3")
+	// fmt.Println("debugging 3")
 	if err != nil {
-		fmt.Println("debugging 4")
+		// fmt.Println("debugging 4")
 		log.Fatal("Failed to create libp2p host:", err)
 	}
 	defer h.Close()
 
 	go func() {
-		fmt.Println("debugging 1")
+		// fmt.Println("debugging 1")
 		if err := p2p.Bootstrap(ctx, h, d); err != nil {
-			fmt.Println("debugging 2")
+			// fmt.Println("debugging 2")
 			log.Printf("Error bootstrapping DHT: %v", err)
 		}
 	}()
@@ -107,7 +108,7 @@ func (c *Client) commandLoop() {
 	for {
 		fmt.Print("> ")
 		if !scanner.Scan() {
-			
+
 			break
 		}
 
@@ -197,8 +198,10 @@ func (c *Client) addFile(filePath string) error {
 		return fmt.Errorf("failed to create multihash: %w", err)
 	}
 
+	// Gives CID(content identifier) a hash to the added file
 	fileCID := cid.NewCidV1(cid.Raw, mhash)
 
+	// add file to the local DB
 	if err := c.db.AddLocalFile(ctx, fileCID.String(), info.Name(), info.Size(), filePath, fileHashStr); err != nil {
 		return fmt.Errorf("failed to store file metadata: %w", err)
 	}
@@ -214,6 +217,7 @@ func (c *Client) addFile(filePath string) error {
 	provideCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
+	// here we are announcing file in DHT
 	if err := c.dht.Provide(provideCtx, fileCID, true); err != nil {
 		log.Printf("Warning: Failed to announce to DHT: %v", err)
 	} else {
@@ -276,8 +280,10 @@ func (c *Client) searchByCID(cidStr string) error {
 	findCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	// this function actually find the file with particular CID!
 	providersChan := c.dht.FindProvidersAsync(findCtx, fileCID, 0)
 
+	// List of peers having that file this returns!
 	var foundPeers []peer.AddrInfo
 	for provider := range providersChan {
 		if provider.ID != c.host.ID() {
