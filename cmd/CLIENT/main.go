@@ -28,6 +28,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multihash"
 	"github.com/pion/webrtc/v3"
+	// dht1 "torrentium/Internal/dht/keycache"
 )
 
 // RWMutex => But when one goroutine writes (adds/removes a peer), it blocks all readers and writers until it’s done (ensures consistency).
@@ -377,10 +378,39 @@ func (c *Client) listConnectedPeers() {
 func (c *Client) initiateWebRTCConnection(targetPeerID peer.ID) (*webRTC.WebRTCPeer, error) {
 	log.Printf("Creating signaling stream to peer %s...", targetPeerID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Second)
 	defer cancel()
+	// fmt.Println("debug 1")
 
-	s, err := c.host.NewStream(ctx, targetPeerID, p2p.SignalingProtocolID)
+	info := peer.AddrInfo{ID: targetPeerID, Addrs: c.host.Peerstore().Addrs(targetPeerID)}
+
+	// If no addrs yet, ask the DHT (libp2p kad) for them
+	if len(info.Addrs) == 0 {
+		pinfo, err := c.dht.FindPeer(ctx, targetPeerID)
+		if err != nil {
+			return nil, fmt.Errorf("could not resolve peer addresses via DHT: %w", err)
+		}
+		info = pinfo
+	}
+
+	if len(info.Addrs) == 0 {
+		return nil, fmt.Errorf("peer %s has no known multiaddrs", targetPeerID)
+	}
+
+	// 3) Put addrs in Peerstore and connect if not already connected
+	c.host.Peerstore().AddAddrs(info.ID, info.Addrs, 30*time.Minute)
+
+	if c.host.Network().Connectedness(info.ID) != network.Connected {
+		if err := c.host.Connect(ctx, info); err != nil {
+			return nil, fmt.Errorf("failed to connect to peer %s: %w", info.ID, err)
+		}
+	}
+
+	// 4) Now open the signaling stream (use the SAME protocol ID as your handler)
+	sctx, scancel := context.WithTimeout(ctx, 20*time.Second)
+	defer scancel()
+
+	s, err := c.host.NewStream(sctx, targetPeerID, p2p.SignalingProtocolID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create signaling stream: %w", err)
 	}
