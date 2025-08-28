@@ -458,52 +458,6 @@ func (c *Client) listLocalFiles() {
 	}
 }
 
-// func (c *Client) searchFiles(query string) error {
-// 	if strings.HasPrefix(query, "bafy") || strings.HasPrefix(query, "Qm") {
-// 		return c.searchByCID(query)
-// 	}
-
-// 	fmt.Printf("Searching for files containing '%s'...\n", query)
-// 	fmt.Println("Note: Direct filename search requires content indexing.")
-// 	fmt.Println("Try using the CID if you have it, or check with known peers.")
-
-// 	return nil
-// // }
-
-// func (c *Client) searchByCID(cidStr string) error {
-// 	ctx := context.Background()
-
-// 	fileCID, err := cid.Decode(cidStr)
-// 	if err != nil {
-// 		return fmt.Errorf("invalid CID: %w", err)
-// 	}
-
-// 	fmt.Printf("Searching for CID: %s\n", fileCID.String())
-
-// 	findCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-// 	defer cancel()
-
-// 	// this function actually find the file with particular CID!
-// 	providersChan := c.dht.FindProvidersAsync(findCtx, fileCID, 0)
-
-// 	// List of peers having that file this returns!
-// 	var foundPeers []peer.AddrInfo
-// 	for provider := range providersChan {
-// 		if provider.ID != c.host.ID() {
-// 			foundPeers = append(foundPeers, provider)
-// 			fmt.Printf("Found provider: %s\n", provider.ID)
-// 		}
-// 	}
-
-// 	if len(foundPeers) == 0 {
-// 		fmt.Println("No providers found for this CID")
-// 		return nil
-// 	}
-
-//		fmt.Printf("Found %d provider(s)\n", len(foundPeers))
-//		return nil
-//	}
-//
 // Updated downloadFile function with better provider filtering
 func (c *Client) downloadFile(cidStr string) error {
 	ctx := context.Background()
@@ -982,67 +936,6 @@ func (c *Client) startDHTMaintenance() {
 		}
 	}()
 }
-
-// // You'll also need this improved bootstrap function as a method of Client
-// func (c *Client) Bootstrap(ctx context.Context) error {
-// 	// Default IPFS bootstrap nodes
-// 	bootstrapNodes := []string{
-// 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-// 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJyrVwtbZg5gBMjTezGAJN",
-// 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zp7VCk8JpNUQLoUPF3HfrDAQGS52a8",
-// 		"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX89HWoNT4gEoNA7MzZqaGzyCu5w",
-// 		"/ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ",
-// 	}
-
-// 	fmt.Println("Connecting to bootstrap nodes...")
-// 	connected := 0
-
-// 	for _, addrStr := range bootstrapNodes {
-// 		addr, err := multiaddr.NewMultiaddr(addrStr)
-// 		if err != nil {
-// 			log.Printf("Invalid bootstrap address %s: %v", addrStr, err)
-// 			continue
-// 		}
-
-// 		pi, err := peer.AddrInfoFromP2pAddr(addr)
-// 		if err != nil {
-// 			log.Printf("Failed to parse bootstrap peer info %s: %v", addrStr, err)
-// 			continue
-// 		}
-
-// 		connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-// 		if err := c.host.Connect(connectCtx, *pi); err != nil {
-// 			log.Printf("Failed to connect to bootstrap node %s: %v", pi.ID, err)
-// 		} else {
-// 			fmt.Printf("Connected to bootstrap node: %s\n", pi.ID)
-// 			connected++
-// 		}
-// 		cancel()
-// 	}
-
-// 	if connected == 0 {
-// 		return fmt.Errorf("failed to connect to any bootstrap nodes")
-// 	}
-
-// 	fmt.Printf("Successfully connected to %d bootstrap nodes\n", connected)
-
-// 	// Bootstrap the DHT
-// 	fmt.Println("Bootstrapping DHT...")
-// 	if err := c.dht.Bootstrap(ctx); err != nil {
-// 		return fmt.Errorf("failed to bootstrap DHT: %w", err)
-// 	}
-
-// 	// Wait for DHT to become ready
-// 	fmt.Println("Waiting for DHT to become ready...")
-// 	select {
-// 	case <-c.dht.RefreshRoutingTable():
-// 		fmt.Println("DHT routing table refreshed")
-// 	case <-time.After(60 * time.Second):
-// 		fmt.Println("DHT bootstrap timeout, continuing anyway...")
-// 	}
-
-// 	return nil
-// }
 
 // Helper function to verify connection readiness
 func (c *Client) isConnectionReady(peerID peer.ID) bool {

@@ -38,6 +38,7 @@ type Repository struct {
 	DB *sql.DB
 }
 
+// To separate out logic od db from overall code!
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{DB: db}
 }
