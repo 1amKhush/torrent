@@ -595,6 +595,10 @@ func (c *Client) downloadFile(cidStr string) error {
 
 		fmt.Println("Download initiated successfully!")
 		_ = c.db.SetPeerScore(ctx, provider.ID.String(), +3)
+
+		// Wait for the download to complete
+		webrtcPeer.WaitForClose()
+		fmt.Println("Download complete!")
 		return nil
 	}
 
