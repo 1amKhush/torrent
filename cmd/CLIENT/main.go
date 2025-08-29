@@ -6,13 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	//"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/signal"
-	//"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +21,7 @@ import (
 	db "torrentium/Internal/db"
 	p2p "torrentium/Internal/p2p"
 
+	"github.com/dustin/go-humanize"
 	"github.com/ipfs/go-cid"
 	"github.com/joho/godotenv"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -32,6 +31,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
 	"github.com/pion/webrtc/v3"
+	"github.com/schollz/progressbar/v3"
 )
 
 const (
@@ -47,9 +47,9 @@ type Client struct {
 	peersMux        sync.RWMutex
 	sharingFiles    map[string]*FileInfo
 	activeDownloads map[string]*os.File
-	downloadsMux    sync.RWMutex
-	db              *db.Repository
-	rateLimitBps    int64
+	//downloadsMux    sync.RWMutex
+	db *db.Repository
+	//rateLimitBps    int64
 }
 
 type FileInfo struct {
@@ -60,13 +60,13 @@ type FileInfo struct {
 	PieceSz  int64
 }
 
-type pieceRequest struct {
-	Command string `json:"command"`
-	CID     string `json:"cid"`
-	Index   int64  `json:"index"`
-	Offset  int64  `json:"offset"`
-	Size    int64  `json:"size"`
-}
+// type pieceRequest struct {
+// 	Command string `json:"command"`
+// 	CID     string `json:"cid"`
+// 	Index   int64  `json:"index"`
+// 	Offset  int64  `json:"offset"`
+// 	Size    int64  `json:"size"`
+// }
 
 type controlMessage struct {
 	Command   string `json:"command"`
@@ -252,7 +252,7 @@ func (c *Client) debugNetworkStatus() {
 
 	routingTableSize := c.dht.RoutingTable().Size()
 	fmt.Printf("\nDHT Routing Table Size: %d\n", routingTableSize)
-	
+
 	fmt.Printf("\nShared Files (%d):\n", len(c.sharingFiles))
 	for cid, fileInfo := range c.sharingFiles {
 		fmt.Printf(" CID: %s\n", cid)
@@ -304,7 +304,7 @@ func (c *Client) checkConnectionHealth() {
 	} else {
 		fmt.Println(" - Good peer connectivity")
 	}
-	
+
 	routingTableSize := c.dht.RoutingTable().Size()
 	fmt.Printf("DHT routing table size: %d\n", routingTableSize)
 	if routingTableSize < 10 {
@@ -385,7 +385,7 @@ func (c *Client) addFile(filePath string) error {
 	fmt.Printf("✓ File '%s' is now being shared\n", info.Name())
 	fmt.Printf(" CID: %s\n", fileCID.String())
 	fmt.Printf(" Hash: %s\n", fileHashStr)
-	fmt.Printf(" Size: %s\n", formatFileSize(info.Size()))
+	fmt.Printf(" Size: %s\n", humanize.Bytes(uint64(info.Size())))
 	return nil
 }
 
@@ -404,7 +404,7 @@ func (c *Client) listLocalFiles() {
 	for _, file := range files {
 		fmt.Printf("Name: %s\n", file.Filename)
 		fmt.Printf(" CID: %s\n", file.CID)
-		fmt.Printf(" Size: %s\n", formatFileSize(file.FileSize))
+		fmt.Printf(" Size: %s\n", humanize.Bytes(uint64(file.FileSize)))
 		fmt.Printf(" Path: %s\n", file.FilePath)
 		fmt.Println(" ---")
 	}
@@ -547,8 +547,7 @@ func (c *Client) downloadFile(cidStr string) error {
 	}
 
 	fmt.Printf("Found %d provider(s). Attempting connections...\n", len(providers))
-	
-	// Sort by peer score
+
 	sort.Slice(providers, func(i, j int) bool {
 		si, _ := c.db.GetPeerScore(ctx, providers[i].ID.String())
 		sj, _ := c.db.GetPeerScore(ctx, providers[j].ID.String())
@@ -563,6 +562,11 @@ func (c *Client) downloadFile(cidStr string) error {
 			fmt.Printf("Failed to connect to provider %s: %v\n", provider.ID, err)
 			_ = c.db.SetPeerScore(ctx, provider.ID.String(), -2)
 			lastErr = err
+			continue
+		}
+
+		if webrtcPeer == nil {
+			lastErr = fmt.Errorf("failed to establish a WebRTC connection with peer %s", provider.ID)
 			continue
 		}
 
@@ -607,15 +611,14 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		
-		// Try to find peer address info
+
 		var info peer.AddrInfo
 		info.ID = targetPeerID
 		if pinfo, err := c.dht.FindPeer(ctx, targetPeerID); err == nil && len(pinfo.Addrs) > 0 {
 			info = pinfo
 			fmt.Printf("Found %d addresses via DHT\n", len(info.Addrs))
 		} else {
-			fmt.Printf("DHT lookup failed: %v\n", err)
+			fmt.Printf("DHT lookup failed: %v. This could be a network issue or the peer may be offline.\n", err)
 			cancel()
 			continue
 		}
@@ -628,7 +631,6 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 
 		c.host.Peerstore().AddAddrs(info.ID, info.Addrs, time.Hour)
 
-		// Connect if not already connected
 		if c.host.Network().Connectedness(info.ID) != network.Connected {
 			fmt.Printf("Connecting to peer %s...\n", info.ID)
 			connectCtx, connectCancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -639,17 +641,15 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 				continue
 			}
 			fmt.Printf("Successfully connected to peer %s\n", info.ID)
-			time.Sleep(2 * time.Second) // Let connection stabilize
+			time.Sleep(2 * time.Second)
 		}
 
-		// Create WebRTC peer
 		webrtcPeer, err := webRTC.NewWebRTCPeer(c.onDataChannelMessage)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 
-		// Create offer
 		offer, err := webrtcPeer.CreateOffer()
 		if err != nil {
 			webrtcPeer.Close()
@@ -657,7 +657,6 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			continue
 		}
 
-		// Create signaling stream
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		s, err := c.host.NewStream(streamCtx, targetPeerID, p2p.SignalingProtocolID)
 		streamCancel()
@@ -669,7 +668,6 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 
 		webrtcPeer.SetSignalingStream(s)
 
-		// Send offer and receive answer
 		encoder := json.NewEncoder(s)
 		decoder := json.NewDecoder(s)
 
@@ -698,7 +696,6 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 			continue
 		}
 
-		// Wait for connection
 		if err := webrtcPeer.WaitForConnection(30 * time.Second); err != nil {
 			webrtcPeer.Close()
 			lastErr = err
@@ -714,7 +711,6 @@ func (c *Client) initiateWebRTCConnectionWithRetry(targetPeerID peer.ID, maxRetr
 	return nil, lastErr
 }
 
-// WebRTC offer handler for incoming connections
 func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream) (string, error) {
 	peerID, err := peer.Decode(remotePeerID)
 	if err != nil {
@@ -740,7 +736,6 @@ func (c *Client) handleWebRTCOffer(offer, remotePeerID string, s network.Stream)
 	return answer, nil
 }
 
-// DataChannel message handler
 func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRTC.WebRTCPeer) {
 	if msg.IsString {
 		var ctrl controlMessage
@@ -748,7 +743,6 @@ func (c *Client) onDataChannelMessage(msg webrtc.DataChannelMessage, peer *webRT
 			c.handleControlMessage(ctrl, peer)
 		}
 	} else {
-		// Binary data - write to file
 		if w := peer.GetFileWriter(); w != nil {
 			_, _ = w.Write(msg.Data)
 		}
@@ -759,7 +753,7 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.WebRTCPe
 	ctx := context.Background()
 	switch ctrl.Command {
 	case "REQUEST_FILE":
-		c.handleFileRequest(ctx, ctrl, peer)
+		go c.handleFileRequest(ctx, ctrl, peer) // Run in a goroutine to avoid blocking
 	case "REQUEST_MANIFEST":
 		c.handleManifestRequest(ctx, ctrl, peer)
 	case "MANIFEST":
@@ -770,53 +764,65 @@ func (c *Client) handleControlMessage(ctrl controlMessage, peer *webRTC.WebRTCPe
 		}
 		manifestChMu.Unlock()
 	case "PIECE_OK":
-		// Acknowledgment - no action needed
 	default:
 		log.Printf("Unknown control command: %s", ctrl.Command)
 	}
 }
 
 func (c *Client) handleFileRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.WebRTCPeer) {
-	fileInfo, exists := c.sharingFiles[ctrl.CID]
-	if !exists {
-		localFile, err := c.db.GetLocalFileByCID(ctx, ctrl.CID)
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		fileInfo, exists := c.sharingFiles[ctrl.CID]
+		if !exists {
+			localFile, err := c.db.GetLocalFileByCID(ctx, ctrl.CID)
+			if err != nil {
+				log.Printf("File not found: %s", ctrl.CID)
+				return
+			}
+			fileInfo = &FileInfo{
+				FilePath: localFile.FilePath,
+				Hash:     localFile.FileHash,
+				Size:     localFile.FileSize,
+				Name:     localFile.Filename,
+			}
+		}
+
+		file, err := os.Open(fileInfo.FilePath)
 		if err != nil {
-			log.Printf("File not found: %s", ctrl.CID)
+			log.Printf("Error opening file %s: %v", fileInfo.FilePath, err)
 			return
 		}
-		fileInfo = &FileInfo{
-			FilePath: localFile.FilePath,
-			Hash:     localFile.FileHash,
-			Size:     localFile.FileSize,
-			Name:     localFile.Filename,
-		}
-	}
+		defer file.Close()
 
-	file, err := os.Open(fileInfo.FilePath)
-	if err != nil {
-		log.Printf("Error opening file %s: %v", fileInfo.FilePath, err)
-		return
-	}
-	defer file.Close()
-
-	// Send file in chunks
-	buffer := make([]byte, MaxChunk)
-	for {
-		n, err := file.Read(buffer)
-		if n > 0 {
-			if sendErr := peer.SendRaw(buffer[:n]); sendErr != nil {
-				log.Printf("Error sending data: %v", sendErr)
+		bar := progressbar.DefaultBytes(
+			fileInfo.Size,
+			"sending",
+		)
+		buffer := make([]byte, MaxChunk)
+		for {
+			n, err := file.Read(buffer)
+			if n > 0 {
+				if sendErr := peer.SendRaw(buffer[:n]); sendErr != nil {
+					log.Printf("Error sending data: %v", sendErr)
+					break
+				}
+				bar.Add(n)
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Printf("Error reading file: %v", err)
 				break
 			}
 		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			log.Printf("Error reading file: %v", err)
-			break
-		}
-	}
+	}()
+
+	wg.Wait()
 }
 
 func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage, peer *webRTC.WebRTCPeer) {
@@ -844,20 +850,6 @@ func (c *Client) handleManifestRequest(ctx context.Context, ctrl controlMessage,
 	if err := peer.SendJSON(manifest); err != nil {
 		log.Printf("Error sending manifest: %v", err)
 	}
-}
-
-// Helper functions
-func formatFileSize(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func min64(a, b int64) int64 {
