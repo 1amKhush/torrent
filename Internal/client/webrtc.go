@@ -13,6 +13,9 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
+// MaxChunk defaults to 64 KiB to align with DataChannel recommendations
+const MaxChunk = 64 * 1024 // 64KiB
+
 type DataChannelMessageHandler func(webrtc.DataChannelMessage, *WebRTCPeer)
 
 type WebRTCPeer struct {
@@ -24,6 +27,10 @@ type WebRTCPeer struct {
 	connectedSignal chan struct{}
 	mu              sync.RWMutex
 	signalingStream network.Stream
+
+	// send queue for backpressure
+	// sendMu   sync.Mutex
+	// sendBusy bool
 }
 
 func NewWebRTCPeer(onMessage DataChannelMessageHandler) (*WebRTCPeer, error) {
@@ -56,7 +63,6 @@ func NewWebRTCPeer(onMessage DataChannelMessageHandler) (*WebRTCPeer, error) {
 
 	pc.OnConnectionStateChange(peer.handleConnectionStateChange)
 	pc.OnDataChannel(peer.handleDataChannel)
-
 	return peer, nil
 }
 
@@ -64,23 +70,20 @@ func (p *WebRTCPeer) handleConnectionStateChange(s webrtc.PeerConnectionState) {
 	p.mu.Lock()
 	p.state = s
 	p.mu.Unlock()
-
 	log.Printf("Peer Connection State changed: %s", s.String())
-
 	if s == webrtc.PeerConnectionStateConnected {
 		select {
 		case <-p.connectedSignal:
 		default:
 			close(p.connectedSignal)
 		}
-	} else if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed {
-		p.Close()
+	} else if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateDisconnected {
+		_ = p.Close()
 	}
 }
 
 func (p *WebRTCPeer) handleDataChannel(dc *webrtc.DataChannel) {
 	log.Printf("New DataChannel %q (ID: %d) received!", dc.Label(), dc.ID())
-	
 	p.mu.Lock()
 	p.dataChannel = dc
 	p.mu.Unlock()
@@ -91,7 +94,9 @@ func (p *WebRTCPeer) handleDataChannel(dc *webrtc.DataChannel) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		p.onMessage(msg, p)
+		if p.onMessage != nil {
+			p.onMessage(msg, p)
+		}
 	})
 
 	dc.OnClose(func() {
@@ -101,13 +106,16 @@ func (p *WebRTCPeer) handleDataChannel(dc *webrtc.DataChannel) {
 }
 
 func (p *WebRTCPeer) CreateOffer() (string, error) {
-	dc, err := p.pc.CreateDataChannel("data", nil)
+	// Create data channel with ordered delivery
+	ordered := true
+	dc, err := p.pc.CreateDataChannel("data", &webrtc.DataChannelInit{
+		Ordered: &ordered,
+	})
 	if err != nil {
 		return "", err
 	}
 
 	p.handleDataChannel(dc)
-
 	offer, err := p.pc.CreateOffer(nil)
 	if err != nil {
 		return "", err
@@ -161,7 +169,6 @@ func (p *WebRTCPeer) SetAnswer(answerSDP string) error {
 func (p *WebRTCPeer) WaitForConnection(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
 	select {
 	case <-p.connectedSignal:
 		return nil
@@ -179,16 +186,13 @@ func (p *WebRTCPeer) IsConnected() bool {
 func (p *WebRTCPeer) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
 	if p.signalingStream != nil {
-		p.signalingStream.Close()
+		_ = p.signalingStream.Close()
 		p.signalingStream = nil
 	}
-
 	if p.pc != nil && p.state != webrtc.PeerConnectionStateClosed {
 		return p.pc.Close()
 	}
-
 	return nil
 }
 
@@ -198,37 +202,42 @@ func (p *WebRTCPeer) SetSignalingStream(s network.Stream) {
 	p.signalingStream = s
 }
 
-func (p *WebRTCPeer) Send(data interface{}) error {
+func (p *WebRTCPeer) SendJSON(v interface{}) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-
 	if !p.IsConnected() {
 		return fmt.Errorf("data channel not open")
 	}
-
-	bytes, err := json.Marshal(data)
+	if p.dataChannel == nil {
+		return fmt.Errorf("data channel is nil")
+	}
+	b, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-
-	return p.dataChannel.SendText(string(bytes))
+	return p.dataChannel.Send(b)
 }
 
 func (p *WebRTCPeer) SendRaw(data []byte) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-
 	if !p.IsConnected() {
 		return fmt.Errorf("data channel not open")
 	}
-
+	if p.dataChannel == nil {
+		return fmt.Errorf("data channel is nil")
+	}
 	return p.dataChannel.Send(data)
 }
 
-func (p *WebRTCPeer) SetFileWriter(writer io.WriteCloser) {
+func (p *WebRTCPeer) Send(data interface{}) error {
+	return p.SendJSON(data)
+}
+
+func (p *WebRTCPeer) SetFileWriter(w io.WriteCloser) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.fileWriter = writer
+	p.fileWriter = w
 }
 
 func (p *WebRTCPeer) GetFileWriter() io.WriteCloser {
